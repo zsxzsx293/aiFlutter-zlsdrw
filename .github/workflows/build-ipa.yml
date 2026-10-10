@@ -1,0 +1,95 @@
+# ---------------------------------------------------------------------------
+# GitHub cloud build for the AiCode Flutter-article web app (iOS .ipa)
+#
+# You need NO local Mac. Push this folder to a GitHub repo; the workflow below
+# builds the native main program, signs and packages an .ipa on a GitHub-hosted
+# macOS runner, and uploads the .ipa as a build artifact.
+#
+# Secrets (repo -> Settings -> Secrets and variables -> Actions) — all optional:
+#   * (none)                     -> ad-hoc signed .ipa. Install on-device via
+#                                    AltStore / Sideloadly with a FREE Apple ID
+#                                    (ad-hoc runs 7 days, then re-run + re-install).
+#   * P12_B64                    -> base64 of your .p12 certificate.
+#   * P12_PASSWORD               -> that .p12's password.
+#   * PROVISION_PROFILE_B64      -> base64 of an .mobileprovision that matches the
+#                                    bundle id + devices. Makes the .ipa directly
+#                                    installable (not just via AltStore).
+#   P12 export:  Keychain Access -> export "Apple (Development) <id>" as .p12
+#                base64:  base64 -i cert.p12        (Linux/macOS)  or  certutil -encode
+# ---------------------------------------------------------------------------
+name: build-ipa
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: macos-14        # Apple toolchain lives on this cloud Mac.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build main program (arm64 iOS Mach-O)
+        working-directory: app/AiCodeFlutterArticle.app
+        run: |
+          set -e
+          echo "iOS SDK: $(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun -sdk iphoneos swiftc -O -target arm64-apple-ios12.0 \
+            -framework UIKit -framework WebKit \
+            Source/main.swift -o AiCodeFlutterArticle
+          chmod +x AiCodeFlutterArticle
+          file AiCodeFlutterArticle     # expect: Mach-O 64-bit executable arm64
+
+      - name: Compile app icon into Assets.car (best-effort)
+        working-directory: app/AiCodeFlutterArticle.app
+        run: |
+          set -e
+          mkdir -p build
+          xcrun actool --app-icon AppIcon AppIcon.appiconset \
+            --compile build --output-format human-readable-text \
+            --target-device iphone --minimum-deployment-target 12.0 \
+            AppIcon.appiconset || echo "actool step non-fatal"
+          AC="$(find build -name Assets.car | head -1)"
+          if [ -n "$AC" ]; then cp "$AC" ./Assets.car && echo "compiled Assets.car"; else echo "no Assets.car (will use legacy icons)"; fi
+
+      - name: Codesign (ad-hoc by default; real certificate when P12_B64 set)
+        working-directory: app/AiCodeFlutterArticle.app
+        run: |
+          set -e
+          if [ -n "${{ secrets.P12_B64 }}" ]; then
+            echo "== real certificate =="
+            echo "${{ secrets.P12_B64 }}" | base64 -d > /tmp/app.p12
+            KC=/tmp/ci.keychain
+            security create-keychain -p ci "$KC"
+            security import /tmp/app.p12 -k "$KC" -P "${{ secrets.P12_PASSWORD }}"
+            security set-keychain-settings -u "$KC"
+            security list-keychains -d user -set "$KC"
+            ID="$(security find-identity -v -p codesigning "$KC" | awk -F'"' '/Development|Distribution/ {print $2; exit}')"
+            echo "signing identity: $ID"
+            codesign --force --deep --sign "$ID" .
+          else
+            echo "== ad-hoc (install via AltStore / Sideloadly, free Apple ID) =="
+            codesign --force --deep --sign - .
+          fi
+          codesign --verify --verbose . || true
+
+      - name: Package .ipa
+        working-directory: app
+        run: |
+          set -e
+          rm -rf Payload && mkdir Payload
+          cp -R AiCodeFlutterArticle.app Payload/
+          if [ -n "${{ secrets.PROVISION_PROFILE_B64 }}" ]; then
+            echo "${{ secrets.PROVISION_PROFILE_B64 }}" | base64 -d > Payload/embedded.mobileprovision
+            echo "embedded provisioning profile -> directly installable .ipa"
+          fi
+          zip -q -X -r AiCodeFlutterArticle.ipa Payload
+          ls -lh AiCodeFlutterArticle.ipa
+
+      - name: Upload .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: AiCodeFlutterArticle
+          path: app/AiCodeFlutterArticle.ipa

@@ -1,0 +1,6 @@
+# CI / local build artifacts (not source)
+*.ipa
+Payload/
+app/AiCodeFlutterArticle.app/AiCodeFlutterArticle
+app/AiCodeFlutterArticle.app/build/
+.DS_Store
