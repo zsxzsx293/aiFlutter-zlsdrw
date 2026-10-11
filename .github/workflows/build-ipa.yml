@@ -27,8 +27,6 @@ on:
 jobs:
   build:
     runs-on: macos-14        # Apple toolchain lives on this cloud Mac.
-    permissions:
-      contents: write        # let GITHUB_TOKEN post the auto failure report as a commit comment
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -107,26 +105,23 @@ jobs:
           name: AiCodeFlutterArticle
           path: app/AiCodeFlutterArticle.ipa
 
-      - name: Report failure details as commit comment (auto)
-        if: failure()
+      - name: Share diagnostics artifact (build log + toolchain info)
+        if: always()
         working-directory: app/AiCodeFlutterArticle.app
         run: |
           set -e
-          { echo "### build-ipa auto failure report"; echo '```'; tail -40 /tmp/build_main.log 2>/dev/null || echo "(no build log — failure before build step)"; echo '```'; } > /tmp/build_report.txt
-          cat /tmp/build_report.txt
-          python3 -c '
-          import json, os, urllib.request
-          body = open("/tmp/build_report.txt").read()
-          tok = os.environ.get("GITHUB_TOKEN", "")
-          base = "https://api.github.com/repos/" + os.environ["GITHUB_REPOSITORY"] + "/commits/" + os.environ["GITHUB_SHA"] + "/comments"
-          req = urllib.request.Request(base,
-              data=json.dumps({"body": body}).encode(),
-              headers={"Authorization": "token " + tok,
-                       "Accept": "application/vnd.github+json",
-                       "User-Agent": "build-ipa-reporter"})
-          try:
-              r = urllib.request.urlopen(req, timeout=30)
-              print("commit comment posted:", r.status)
-          except Exception as e:
-              print("post commit comment failed (non-fatal):", e)
-          '
+          { echo "### build-ipa diagnostics"; echo "## run conclusion hint: log tail below"; 
+            echo '## last 50 lines of build log'; tail -50 /tmp/build_main.log 2>/dev/null || echo '(no /tmp/build_main.log)'; 
+            echo '## toolchain'; xcodebuild -version 2>/dev/null || true; swift --version 2>/dev/null | head -1 || true; 
+            echo '## sdk'; echo "$(xcrun --sdk iphoneos --show-sdk-path)"; } > /tmp/build-report.txt
+          zip -q -j /tmp/build-report.zip /tmp/build-report.txt 2>/dev/null || cp /tmp/build-report.txt /tmp/build-report.zip
+          cp /tmp/build-report.zip build-report.zip
+        shell: bash
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-report
+          path: app/AiCodeFlutterArticle.app/build-report.zip
+          if-no-files-found: ignore
+          retention-days: 1
