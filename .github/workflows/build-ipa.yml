@@ -27,6 +27,8 @@ on:
 jobs:
   build:
     runs-on: macos-14        # Apple toolchain lives on this cloud Mac.
+    permissions:
+      contents: write        # let GITHUB_TOKEN post the auto failure report as a commit comment
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,12 +37,23 @@ jobs:
         working-directory: app/AiCodeFlutterArticle.app
         run: |
           set -e
-          echo "iOS SDK: $(xcrun --sdk iphoneos --show-sdk-path)"
+          exec > >(tee -a /tmp/build_main.log) 2>&1
+          echo "=== toolchain forensics ==="
+          xcodebuild -version || true
+          swift --version 2>/dev/null | head -1 || true
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          echo "iOS SDK: $SDK"
           xcrun -sdk iphoneos swiftc -O -target arm64-apple-ios12.0 \
             -framework UIKit -framework WebKit \
-            Source/main.swift -o AiCodeFlutterArticle
+            -F "$SDK/System/iOSSupport/System/Library/Frameworks" \
+            -L "$SDK/System/iOSSupport/usr/lib/swift" \
+            Source/main.swift -o AiCodeFlutterArticle || {
+              echo "swiftc FAILED — SDK/System layout: $(ls "$SDK/System" 2>&1 | head -10)"
+              echo "iOSSupport layout: $(ls "$SDK/System/iOSSupport" 2>&1 | head -10)"
+              exit 1
+            }
           chmod +x AiCodeFlutterArticle
-          file AiCodeFlutterArticle     # expect: Mach-O 64-bit executable arm64
+          if command -v file >/dev/null 2>&1; then file AiCodeFlutterArticle; else otool -hv AiCodeFlutterArticle | head -3; fi
 
       - name: Compile app icon into Assets.car (best-effort)
         working-directory: app/AiCodeFlutterArticle.app
@@ -93,3 +106,27 @@ jobs:
         with:
           name: AiCodeFlutterArticle
           path: app/AiCodeFlutterArticle.ipa
+
+      - name: Report failure details as commit comment (auto)
+        if: failure()
+        working-directory: app/AiCodeFlutterArticle.app
+        run: |
+          set -e
+          { echo "### build-ipa auto failure report"; echo '```'; tail -40 /tmp/build_main.log 2>/dev/null || echo "(no build log — failure before build step)"; echo '```'; } > /tmp/build_report.txt
+          cat /tmp/build_report.txt
+          python3 -c '
+          import json, os, urllib.request
+          body = open("/tmp/build_report.txt").read()
+          tok = os.environ.get("GITHUB_TOKEN", "")
+          base = "https://api.github.com/repos/" + os.environ["GITHUB_REPOSITORY"] + "/commits/" + os.environ["GITHUB_SHA"] + "/comments"
+          req = urllib.request.Request(base,
+              data=json.dumps({"body": body}).encode(),
+              headers={"Authorization": "token " + tok,
+                       "Accept": "application/vnd.github+json",
+                       "User-Agent": "build-ipa-reporter"})
+          try:
+              r = urllib.request.urlopen(req, timeout=30)
+              print("commit comment posted:", r.status)
+          except Exception as e:
+              print("post commit comment failed (non-fatal):", e)
+          '
